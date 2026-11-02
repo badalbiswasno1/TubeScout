@@ -69,15 +69,45 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun collectSuggestions(niche: String): List<String> {
-        val suffixes = listOf("", " how", " why", " day in life", " problem", " bangla", " hindi")
+        val seeds = listOf(niche, "store incharge", "construction site life")
+        val suffixes = listOf("", " how", " why", " day in life", " problem", " bangla", " hindi", " vlog")
         val seen = LinkedHashSet<String>()
-        for (s in suffixes) {
-            try {
-                seen.addAll(suggest(niche + s))
-            } catch (e: Exception) {
+        for (seed in seeds) {
+            for (s in suffixes) {
+                try {
+                    seen.addAll(suggest(seed + s))
+                } catch (e: Exception) {
+                }
             }
         }
         return seen.toList()
+    }
+
+    private fun wordCounts(texts: List<String>, skip: Set<String>): List<Map.Entry<String, Int>> {
+        val counts = HashMap<String, Int>()
+        for (t in texts) {
+            val words = t.lowercase().split(Regex("[^\\p{L}\\p{N}]+"))
+            for (w in words.toSet()) {
+                if (w.length >= 3 && w !in stopWords && w !in skip) {
+                    counts[w] = (counts[w] ?: 0) + 1
+                }
+            }
+        }
+        return counts.entries.filter { it.value >= 2 }.sortedByDescending { it.value }
+    }
+
+    private fun suggestionReport(niche: String, sugg: List<String>): String {
+        val nicheWords = niche.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).toSet()
+        val words = wordCounts(sugg, nicheWords).take(15)
+        val sb = StringBuilder()
+        sb.append("TOPIC IDEAS (what people search on YouTube)\n")
+        if (sugg.isEmpty()) sb.append("-\n")
+        else sugg.take(40).forEachIndexed { i, s -> sb.append("${i + 1}. $s\n") }
+        sb.append("\nKEYWORDS\n")
+        sb.append(words.joinToString(", ") { it.key }).append("\n")
+        sb.append("\nHASHTAGS\n")
+        sb.append(words.take(10).joinToString(" ") { "#" + it.key })
+        return sb.toString()
     }
 
     private fun buildReport(niche: String, list: List<Vid>, sugg: List<String>): String {
@@ -90,19 +120,7 @@ class MainActivity : AppCompatActivity() {
         val withQuestion = list.count { it.title.contains("?") }
 
         val nicheWords = niche.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).toSet()
-        val wordCounts = HashMap<String, Int>()
-        for (v in list) {
-            val words = v.title.lowercase().split(Regex("[^\\p{L}\\p{N}]+"))
-            for (w in words.toSet()) {
-                if (w.length >= 3 && w !in stopWords && w !in nicheWords) {
-                    wordCounts[w] = (wordCounts[w] ?: 0) + 1
-                }
-            }
-        }
-        val topWords = wordCounts.entries
-            .filter { it.value >= 2 }
-            .sortedByDescending { it.value }
-            .take(12)
+        val topWords = wordCounts(list.map { it.title }, nicheWords).take(12)
 
         val tagCounts = HashMap<String, Int>()
         for (v in list) {
@@ -123,7 +141,7 @@ class MainActivity : AppCompatActivity() {
 
         sb.append("\nTOPIC IDEAS (what people search)\n")
         if (sugg.isEmpty()) sb.append("-\n")
-        else sugg.take(20).forEachIndexed { i, s -> sb.append("${i + 1}. $s\n") }
+        else sugg.take(30).forEachIndexed { i, s -> sb.append("${i + 1}. $s\n") }
 
         sb.append("\nKEYWORDS\n")
         sb.append(topTags.joinToString(", ") { it.key }).append("\n")
@@ -134,6 +152,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun research(key: String, niche: String): Result {
+        val sugg = collectSuggestions(niche)
+        if (key.isEmpty()) {
+            return Result(emptyList(), suggestionReport(niche, sugg))
+        }
+
         val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
         cal.add(Calendar.DAY_OF_YEAR, -90)
         val fmtDate = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
@@ -178,7 +201,6 @@ class MainActivity : AppCompatActivity() {
         }
         list.sortByDescending { it.views }
 
-        val sugg = collectSuggestions(niche)
         return Result(list.take(10), buildReport(niche, list, sugg))
     }
 
@@ -237,7 +259,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val keyInput = EditText(this).apply {
-            hint = "YouTube API key"
+            hint = "YouTube API key (optional)"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             setText(prefs.getString("api_key", ""))
         }
@@ -269,8 +291,8 @@ class MainActivity : AppCompatActivity() {
         runButton.setOnClickListener {
             val key = keyInput.text.toString().trim()
             val niche = nicheInput.text.toString().trim()
-            if (key.isEmpty() || niche.isEmpty()) {
-                status.text = "API key and niche required."
+            if (niche.isEmpty()) {
+                status.text = "Niche required."
                 return@setOnClickListener
             }
             prefs.edit().putString("api_key", key).putString("niche", niche).apply()
@@ -282,7 +304,7 @@ class MainActivity : AppCompatActivity() {
                 try {
                     val res = research(key, niche)
                     runOnUiThread {
-                        status.text = "Done"
+                        status.text = if (key.isEmpty()) "Done (no API key: suggestions only)" else "Done"
                         reportView.text = res.report
                         res.top.forEachIndexed { i, v -> listBox.addView(videoRow(i, v)) }
                         runButton.isEnabled = true
