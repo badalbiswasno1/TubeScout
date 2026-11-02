@@ -35,15 +35,18 @@ class MainActivity : AppCompatActivity() {
 
     private data class Result(
         val top: List<Vid>,
-        val keywords: String,
-        val hashtags: String
+        val report: String
     )
 
-    private var last: Result? = null
-
-    private val claudeModel = "claude-sonnet-5-5"
+    private val stopWords = setOf(
+        "the", "and", "for", "with", "you", "this", "that", "from", "how", "what",
+        "your", "are", "was", "all", "can", "not", "but", "has", "have", "our",
+        "full", "new", "official", "video", "videos"
+    )
 
     private fun dp(n: Int): Int = (n * resources.displayMetrics.density).toInt()
+
+    private fun fmt(n: Long): String = String.format(Locale.US, "%,d", n)
 
     private fun httpGet(link: String): String {
         val conn = URL(link).openConnection() as HttpURLConnection
@@ -56,12 +59,86 @@ class MainActivity : AppCompatActivity() {
         return body
     }
 
+    private fun suggest(q: String): List<String> {
+        val url = "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=" +
+            URLEncoder.encode(q, "UTF-8")
+        val arr = JSONArray(httpGet(url)).getJSONArray(1)
+        val out = ArrayList<String>()
+        for (i in 0 until arr.length()) out.add(arr.getString(i))
+        return out
+    }
+
+    private fun collectSuggestions(niche: String): List<String> {
+        val suffixes = listOf("", " how", " why", " day in life", " problem", " bangla", " hindi")
+        val seen = LinkedHashSet<String>()
+        for (s in suffixes) {
+            try {
+                seen.addAll(suggest(niche + s))
+            } catch (e: Exception) {
+            }
+        }
+        return seen.toList()
+    }
+
+    private fun buildReport(niche: String, list: List<Vid>, sugg: List<String>): String {
+        val views = list.map { it.views }.sorted()
+        val avg = views.average().toLong()
+        val median = views[views.size / 2]
+        val best = views.last()
+        val avgLen = list.map { it.title.length }.average().toInt()
+        val withNumber = list.count { v -> v.title.any { it.isDigit() } }
+        val withQuestion = list.count { it.title.contains("?") }
+
+        val nicheWords = niche.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).toSet()
+        val wordCounts = HashMap<String, Int>()
+        for (v in list) {
+            val words = v.title.lowercase().split(Regex("[^\\p{L}\\p{N}]+"))
+            for (w in words.toSet()) {
+                if (w.length >= 3 && w !in stopWords && w !in nicheWords) {
+                    wordCounts[w] = (wordCounts[w] ?: 0) + 1
+                }
+            }
+        }
+        val topWords = wordCounts.entries
+            .filter { it.value >= 2 }
+            .sortedByDescending { it.value }
+            .take(12)
+
+        val tagCounts = HashMap<String, Int>()
+        for (v in list) {
+            for (t in v.tags) tagCounts[t] = (tagCounts[t] ?: 0) + 1
+        }
+        val topTags = tagCounts.entries.sortedByDescending { it.value }.take(15)
+
+        val sb = StringBuilder()
+        sb.append("REPORT\n")
+        sb.append("Videos analyzed: ${list.size} (last 90 days)\n")
+        sb.append("Views: avg ${fmt(avg)} | median ${fmt(median)} | best ${fmt(best)}\n")
+        sb.append("Avg title length: $avgLen chars\n")
+        sb.append("Titles with number: $withNumber/${list.size} | with question: $withQuestion/${list.size}\n")
+
+        sb.append("\nPOPULAR TITLE WORDS\n")
+        if (topWords.isEmpty()) sb.append("-\n")
+        else sb.append(topWords.joinToString(", ") { "${it.key} (${it.value})" }).append("\n")
+
+        sb.append("\nTOPIC IDEAS (what people search)\n")
+        if (sugg.isEmpty()) sb.append("-\n")
+        else sugg.take(20).forEachIndexed { i, s -> sb.append("${i + 1}. $s\n") }
+
+        sb.append("\nKEYWORDS\n")
+        sb.append(topTags.joinToString(", ") { it.key }).append("\n")
+
+        sb.append("\nHASHTAGS\n")
+        sb.append(topTags.take(10).joinToString(" ") { "#" + it.key.replace(" ", "") })
+        return sb.toString()
+    }
+
     private fun research(key: String, niche: String): Result {
         val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
         cal.add(Calendar.DAY_OF_YEAR, -90)
-        val fmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
-        fmt.timeZone = TimeZone.getTimeZone("UTC")
-        val after = URLEncoder.encode(fmt.format(cal.time), "UTF-8")
+        val fmtDate = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
+        fmtDate.timeZone = TimeZone.getTimeZone("UTC")
+        val after = URLEncoder.encode(fmtDate.format(cal.time), "UTF-8")
         val q = URLEncoder.encode(niche, "UTF-8")
 
         val searchUrl = "https://www.googleapis.com/youtube/v3/search" +
@@ -101,71 +178,8 @@ class MainActivity : AppCompatActivity() {
         }
         list.sortByDescending { it.views }
 
-        val counts = HashMap<String, Int>()
-        for (v in list) {
-            for (t in v.tags) counts[t] = (counts[t] ?: 0) + 1
-        }
-        val top = counts.entries.sortedByDescending { it.value }.take(15)
-        val keywords = top.joinToString(", ") { it.key }
-        val hashtags = top.take(10).joinToString(" ") { "#" + it.key.replace(" ", "") }
-        return Result(list.take(10), keywords, hashtags)
-    }
-
-    private fun buildPrompt(channel: String, niche: String, res: Result): String {
-        val sb = StringBuilder()
-        sb.append("You are a YouTube growth strategist.\n")
-        sb.append("Channel: $channel\n")
-        sb.append("Niche: $niche\n")
-        sb.append("Creator: a construction site Store Incharge in India making unfiltered, real-life Bengali vlogs. ")
-        sb.append("Face on camera, 5 to 8 minute videos plus Shorts. ")
-        sb.append("Never suggest topics that expose company names, rates, or identifiable people.\n\n")
-        sb.append("Trending videos in this niche (last 90 days):\n")
-        res.top.forEachIndexed { i, v ->
-            sb.append("${i + 1}. ${v.title} (${v.views} views)\n")
-        }
-        sb.append("\nFrequent tags: ${res.keywords}\n\n")
-        sb.append("Task: suggest the 10 best video topics for this channel. ")
-        sb.append("For each give: topic, a Bengali title, a thumbnail idea ")
-        sb.append("(short text on thumbnail, main color, facial expression), ")
-        sb.append("5 keywords, 5 hashtags. Write in Bengali script with English words where natural. ")
-        sb.append("Keep it concise. Plain text only, no markdown symbols.")
-        return sb.toString()
-    }
-
-    private fun callClaude(apiKey: String, prompt: String): String {
-        val body = JSONObject()
-            .put("model", claudeModel)
-            .put("max_tokens", 3000)
-            .put(
-                "messages",
-                JSONArray().put(
-                    JSONObject().put("role", "user").put("content", prompt)
-                )
-            )
-            .toString()
-
-        val conn = URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection
-        conn.requestMethod = "POST"
-        conn.doOutput = true
-        conn.connectTimeout = 20000
-        conn.readTimeout = 120000
-        conn.setRequestProperty("content-type", "application/json")
-        conn.setRequestProperty("x-api-key", apiKey)
-        conn.setRequestProperty("anthropic-version", "2023-06-01")
-        conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-
-        val code = conn.responseCode
-        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-        val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
-        if (code !in 200..299) throw RuntimeException("HTTP $code: $text")
-
-        val arr = JSONObject(text).getJSONArray("content")
-        val out = StringBuilder()
-        for (i in 0 until arr.length()) {
-            val block = arr.getJSONObject(i)
-            if (block.optString("type") == "text") out.append(block.getString("text"))
-        }
-        return out.toString()
+        val sugg = collectSuggestions(niche)
+        return Result(list.take(10), buildReport(niche, list, sugg))
     }
 
     private fun loadThumb(view: ImageView, videoId: String) {
@@ -196,7 +210,7 @@ class MainActivity : AppCompatActivity() {
         row.addView(img, LinearLayout.LayoutParams(dp(150), dp(84)))
         val info = TextView(this).apply {
             textSize = 14f
-            text = "${index + 1}. ${v.title}\n${v.views} views\n${v.channel}"
+            text = "${index + 1}. ${v.title}\n${fmt(v.views)} views\n${v.channel}"
             setPadding(dp(10), 0, 0, 0)
         }
         row.addView(
@@ -228,29 +242,13 @@ class MainActivity : AppCompatActivity() {
             setText(prefs.getString("api_key", ""))
         }
 
-        val claudeKeyInput = EditText(this).apply {
-            hint = "Claude API key"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setText(prefs.getString("claude_key", ""))
-        }
-
-        val channelInput = EditText(this).apply {
-            hint = "Channel name"
-            setText("Unfiltered Badal")
-        }
-
         val nicheInput = EditText(this).apply {
             hint = "Niche"
-            setText("store incharge construction site vlog")
+            setText(prefs.getString("niche", "store incharge construction site vlog"))
         }
 
         val runButton = Button(this).apply {
-            text = "Research"
-        }
-
-        val aiButton = Button(this).apply {
-            text = "AI: top 10 topics"
-            isEnabled = false
+            text = "Research + Report"
         }
 
         val status = TextView(this).apply {
@@ -258,20 +256,14 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, dp(12), 0, 0)
         }
 
+        val reportView = TextView(this).apply {
+            textSize = 15f
+            setTextIsSelectable(true)
+            setPadding(0, dp(12), 0, dp(12))
+        }
+
         val listBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-        }
-
-        val extras = TextView(this).apply {
-            textSize = 15f
-            setTextIsSelectable(true)
-            setPadding(0, dp(12), 0, 0)
-        }
-
-        val aiOut = TextView(this).apply {
-            textSize = 15f
-            setTextIsSelectable(true)
-            setPadding(0, dp(16), 0, 0)
         }
 
         runButton.setOnClickListener {
@@ -281,23 +273,19 @@ class MainActivity : AppCompatActivity() {
                 status.text = "API key and niche required."
                 return@setOnClickListener
             }
-            prefs.edit().putString("api_key", key).apply()
+            prefs.edit().putString("api_key", key).putString("niche", niche).apply()
             status.text = "Searching..."
+            reportView.text = ""
             listBox.removeAllViews()
-            extras.text = ""
-            aiOut.text = ""
-            aiButton.isEnabled = false
             runButton.isEnabled = false
             Thread {
                 try {
                     val res = research(key, niche)
-                    last = res
                     runOnUiThread {
-                        status.text = "Top videos (last 90 days)"
+                        status.text = "Done"
+                        reportView.text = res.report
                         res.top.forEachIndexed { i, v -> listBox.addView(videoRow(i, v)) }
-                        extras.text = "Keywords\n${res.keywords}\n\nHashtags\n${res.hashtags}"
                         runButton.isEnabled = true
-                        aiButton.isEnabled = true
                     }
                 } catch (e: Exception) {
                     runOnUiThread {
@@ -308,49 +296,13 @@ class MainActivity : AppCompatActivity() {
             }.start()
         }
 
-        aiButton.setOnClickListener {
-            val res = last
-            val ck = claudeKeyInput.text.toString().trim()
-            if (res == null) {
-                aiOut.text = "Run Research first."
-                return@setOnClickListener
-            }
-            if (ck.isEmpty()) {
-                aiOut.text = "Claude API key required."
-                return@setOnClickListener
-            }
-            prefs.edit().putString("claude_key", ck).apply()
-            aiOut.text = "Thinking..."
-            aiButton.isEnabled = false
-            val prompt = buildPrompt(
-                channelInput.text.toString().trim(),
-                nicheInput.text.toString().trim(),
-                res
-            )
-            Thread {
-                val out = try {
-                    callClaude(ck, prompt)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                runOnUiThread {
-                    aiOut.text = out
-                    aiButton.isEnabled = true
-                }
-            }.start()
-        }
-
         root.addView(title)
         root.addView(keyInput)
-        root.addView(claudeKeyInput)
-        root.addView(channelInput)
         root.addView(nicheInput)
         root.addView(runButton)
-        root.addView(aiButton)
         root.addView(status)
+        root.addView(reportView)
         root.addView(listBox)
-        root.addView(extras)
-        root.addView(aiOut)
 
         val scroll = ScrollView(this)
         scroll.addView(
