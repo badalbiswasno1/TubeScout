@@ -1,10 +1,14 @@
 package com.badal.tubescout
 
+import android.content.Intent
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -21,11 +25,20 @@ import java.util.TimeZone
 class MainActivity : AppCompatActivity() {
 
     private data class Vid(
+        val id: String,
         val title: String,
         val channel: String,
         val views: Long,
         val tags: List<String>
     )
+
+    private data class Result(
+        val top: List<Vid>,
+        val keywords: String,
+        val hashtags: String
+    )
+
+    private fun dp(n: Int): Int = (n * resources.displayMetrics.density).toInt()
 
     private fun httpGet(link: String): String {
         val conn = URL(link).openConnection() as HttpURLConnection
@@ -38,7 +51,7 @@ class MainActivity : AppCompatActivity() {
         return body
     }
 
-    private fun research(key: String, niche: String): String {
+    private fun research(key: String, niche: String): Result {
         val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
         cal.add(Calendar.DAY_OF_YEAR, -90)
         val fmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
@@ -50,7 +63,7 @@ class MainActivity : AppCompatActivity() {
             "?part=snippet&type=video&order=viewCount&maxResults=25" +
             "&regionCode=IN&publishedAfter=$after&q=$q&key=$key"
         val items = JSONObject(httpGet(searchUrl)).getJSONArray("items")
-        if (items.length() == 0) return "No videos found."
+        if (items.length() == 0) throw RuntimeException("No videos found.")
 
         val ids = ArrayList<String>()
         for (i in 0 until items.length()) {
@@ -73,6 +86,7 @@ class MainActivity : AppCompatActivity() {
             }
             list.add(
                 Vid(
+                    v.getString("id"),
                     sn.getString("title"),
                     sn.getString("channelTitle"),
                     st.optString("viewCount", "0").toLong(),
@@ -82,33 +96,63 @@ class MainActivity : AppCompatActivity() {
         }
         list.sortByDescending { it.views }
 
-        val sb = StringBuilder()
-        sb.append("Top videos (last 90 days)\n\n")
-        list.take(10).forEachIndexed { i, v ->
-            sb.append("${i + 1}. ${v.title}\n   ${v.views} views | ${v.channel}\n\n")
-        }
-
         val counts = HashMap<String, Int>()
         for (v in list) {
             for (t in v.tags) counts[t] = (counts[t] ?: 0) + 1
         }
         val top = counts.entries.sortedByDescending { it.value }.take(15)
-        sb.append("Keywords\n")
-        sb.append(top.joinToString(", ") { it.key })
-        sb.append("\n\nHashtags\n")
-        sb.append(top.take(10).joinToString(" ") { "#" + it.key.replace(" ", "") })
-        return sb.toString()
+        val keywords = top.joinToString(", ") { it.key }
+        val hashtags = top.take(10).joinToString(" ") { "#" + it.key.replace(" ", "") }
+        return Result(list.take(10), keywords, hashtags)
+    }
+
+    private fun loadThumb(view: ImageView, videoId: String) {
+        Thread {
+            try {
+                val url = URL("https://i.ytimg.com/vi/$videoId/mqdefault.jpg")
+                val bmp = BitmapFactory.decodeStream(url.openStream())
+                runOnUiThread { view.setImageBitmap(bmp) }
+            } catch (e: Exception) {
+            }
+        }.start()
+    }
+
+    private fun videoRow(index: Int, v: Vid): LinearLayout {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8), 0, dp(8))
+            setOnClickListener {
+                startActivity(
+                    Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/watch?v=${v.id}"))
+                )
+            }
+        }
+        val img = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            setBackgroundColor(0xFF333333.toInt())
+        }
+        row.addView(img, LinearLayout.LayoutParams(dp(150), dp(84)))
+        val info = TextView(this).apply {
+            textSize = 14f
+            text = "${index + 1}. ${v.title}\n${v.views} views\n${v.channel}"
+            setPadding(dp(10), 0, 0, 0)
+        }
+        row.addView(
+            info,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        loadThumb(img, v.id)
+        return row
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val prefs = getSharedPreferences("tubescout", MODE_PRIVATE)
-        val pad = (16 * resources.displayMetrics.density).toInt()
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad * 2, pad, pad)
+            setPadding(dp(16), dp(32), dp(16), dp(16))
         }
 
         val title = TextView(this).apply {
@@ -136,31 +180,47 @@ class MainActivity : AppCompatActivity() {
             text = "Research"
         }
 
-        val output = TextView(this).apply {
+        val status = TextView(this).apply {
+            textSize = 15f
+            setPadding(0, dp(12), 0, 0)
+        }
+
+        val listBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        val extras = TextView(this).apply {
             textSize = 15f
             setTextIsSelectable(true)
-            setPadding(0, pad, 0, 0)
+            setPadding(0, dp(12), 0, 0)
         }
 
         runButton.setOnClickListener {
             val key = keyInput.text.toString().trim()
             val niche = nicheInput.text.toString().trim()
             if (key.isEmpty() || niche.isEmpty()) {
-                output.text = "API key and niche required."
+                status.text = "API key and niche required."
                 return@setOnClickListener
             }
             prefs.edit().putString("api_key", key).apply()
-            output.text = "Searching..."
+            status.text = "Searching..."
+            listBox.removeAllViews()
+            extras.text = ""
             runButton.isEnabled = false
             Thread {
-                val result = try {
-                    research(key, niche)
+                try {
+                    val res = research(key, niche)
+                    runOnUiThread {
+                        status.text = "Top videos (last 90 days)"
+                        res.top.forEachIndexed { i, v -> listBox.addView(videoRow(i, v)) }
+                        extras.text = "Keywords\n${res.keywords}\n\nHashtags\n${res.hashtags}"
+                        runButton.isEnabled = true
+                    }
                 } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                runOnUiThread {
-                    output.text = result
-                    runButton.isEnabled = true
+                    runOnUiThread {
+                        status.text = "Error: ${e.message}"
+                        runButton.isEnabled = true
+                    }
                 }
             }.start()
         }
@@ -170,17 +230,18 @@ class MainActivity : AppCompatActivity() {
         root.addView(channelInput)
         root.addView(nicheInput)
         root.addView(runButton)
+        root.addView(status)
+        root.addView(listBox)
+        root.addView(extras)
 
         val scroll = ScrollView(this)
         scroll.addView(
-            output,
+            root,
             ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
         )
-        root.addView(scroll)
-
-        setContentView(root)
+        setContentView(scroll)
     }
 }
